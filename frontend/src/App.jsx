@@ -28,11 +28,12 @@ function PageTransition({ children }) {
 export default function App() {
   const [agentOpen, setAgentOpen] = useState(false)
   const location = useLocation()
+  const isVoicePage = location.pathname === '/voice'
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen flex-col overflow-x-hidden">
       <Navbar onOpenAgent={() => setAgentOpen(true)} />
-      <main className="flex-1">
+      <main className="flex flex-1 flex-col">
         <AnimatePresence mode="wait">
           <Routes location={location} key={location.pathname}>
             <Route path="/" element={<PageTransition><Home onOpenAgent={() => setAgentOpen(true)} /></PageTransition>} />
@@ -45,15 +46,17 @@ export default function App() {
           </Routes>
         </AnimatePresence>
       </main>
-      <Footer />
+      {!isVoicePage && <Footer />}
 
-      <button
-        onClick={() => setAgentOpen(true)}
-        className={`fixed bottom-6 right-6 z-30 flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-indigo-600 to-fuchsia-600 text-white shadow-xl transition hover:scale-105 sm:hidden ${agentOpen ? 'scale-0' : 'scale-100'}`}
-        aria-label="Open Ava"
-      >
-        <span className="text-sm font-bold">Ava</span>
-      </button>
+      {!isVoicePage && (
+        <button
+          onClick={() => setAgentOpen(true)}
+          className={`fixed bottom-6 right-6 z-30 flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-indigo-600 to-fuchsia-600 text-white shadow-xl transition hover:scale-105 sm:hidden ${agentOpen ? 'scale-0' : 'scale-100'}`}
+          aria-label="Open Ava"
+        >
+          <span className="text-sm font-bold">Ava</span>
+        </button>
+      )}
 
       <AgentChat open={agentOpen} onClose={() => setAgentOpen(false)} />
     </div>
