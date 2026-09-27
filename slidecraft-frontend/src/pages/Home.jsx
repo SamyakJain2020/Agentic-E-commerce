@@ -104,8 +104,10 @@ export default function Home() {
             Raw analysis in. A brand-aligned deck out.
           </h1>
           <p className="mt-3 max-w-xl text-sm text-white/60">
-            Paste your analysis, drop in source documents, and Gemini builds a dense, 2–5 slide narrative with
-            real images and on-brand visuals — editable live in chat, and pushed to Canva.
+            Paste your analysis, drop in source documents, and Gemini builds a dense, information-heavy deck —
+            KPI grids, tables, timelines, matrices, charts — editable live in chat, and pushed to Canva.
+            Say how many slides you want in the analysis text (e.g. "make it 8 slides") — defaults to
+            whatever the content supports if you don't specify.
           </p>
         </div>
 

@@ -30,7 +30,7 @@ export default function ChatPanel({ onDeckUpdate }) {
     try {
       const res = await api.chat(msg)
       setMessages((m) => [...m, { role: 'agent', text: res.reply }])
-      onDeckUpdate({ brand: res.brand, slides: res.slides })
+      onDeckUpdate({ brand: res.brand, slides: res.slides, deckTitle: res.deckTitle })
     } catch (e) {
       setMessages((m) => [...m, { role: 'agent', text: `Sorry, that failed: ${e.message}` }])
     } finally {

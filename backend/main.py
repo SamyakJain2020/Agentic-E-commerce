@@ -392,7 +392,7 @@ def slidecraft_chat():
         deck, reply = slidecraft.revise_deck(sid, message, api_key)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    return jsonify({"reply": reply, "brand": deck["brand"], "slides": deck["slides"]})
+    return jsonify({"reply": reply, "brand": deck["brand"], "slides": deck["slides"], "deckTitle": deck.get("deckTitle")})
 
 
 @app.route('/api/slidecraft/canva/sync', methods=['POST'])

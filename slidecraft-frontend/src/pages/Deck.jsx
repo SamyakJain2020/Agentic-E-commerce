@@ -89,7 +89,7 @@ export default function Deck() {
 
       <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-4 py-6 sm:px-6 lg:flex-row lg:py-8">
         <div className="min-w-0 flex-1">
-          <SlideViewer slides={deck.slides} brand={deck.brand} />
+          <SlideViewer slides={deck.slides} brand={deck.brand} deckTitle={deck.deckTitle} logoUrl={deck.logoUrl} />
         </div>
         <div className="h-[480px] w-full shrink-0 lg:h-auto lg:w-96">
           <ChatPanel onDeckUpdate={onDeckUpdate} />

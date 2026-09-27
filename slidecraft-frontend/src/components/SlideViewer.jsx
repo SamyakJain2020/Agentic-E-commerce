@@ -1,85 +1,48 @@
 import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ChevronLeftIcon, ChevronRightIcon, PhotoIcon } from '@heroicons/react/24/outline'
+import { ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline'
+import { LAYOUTS } from './layouts'
+import { withAlpha } from './layouts/shared'
 
-function ChartFallback({ points, accent }) {
-  const max = Math.max(1, ...points.map((p) => p.value))
+function Slide({ slide, brand, deckTitle, logoUrl, index, total }) {
+  const Layout = LAYOUTS[slide.layout] || LAYOUTS['photo-feature']
+  const isBig = slide.layout === 'big-statement'
+
   return (
-    <div className="flex h-full w-full flex-col justify-center gap-2.5 p-4">
-      {points.map((p, i) => (
-        <div key={i} className="min-w-0">
-          <div className="flex items-baseline justify-between gap-2 text-[11px] text-white/60">
-            <span className="truncate">{p.label}</span>
-            <span className="shrink-0 font-semibold text-white">{p.value}{p.isPercent ? '%' : ''}</span>
+    <div className="flex aspect-video w-full flex-col overflow-hidden rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm sm:p-6">
+      {!isBig && (
+        <div className="mb-3 shrink-0">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              {slide.sectionTag && (
+                <span className="inline-block rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-white" style={{ background: brand.secondaryHex }}>
+                  {slide.sectionTag}
+                </span>
+              )}
+              <h2 className="mt-1 line-clamp-1 font-display text-lg font-bold leading-tight sm:text-xl" style={{ color: brand.primaryHex }}>
+                {slide.title}
+              </h2>
+              {slide.subtitle && <p className="line-clamp-1 text-xs italic text-neutral-400">{slide.subtitle}</p>}
+            </div>
+            {logoUrl && <img src={logoUrl} alt="" className="h-7 w-7 shrink-0 rounded object-contain" />}
           </div>
-          <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-white/10">
-            <div className="h-full rounded-full" style={{ width: `${(p.value / max) * 100}%`, background: accent }} />
-          </div>
+          <div className="mt-2 border-t border-dashed" style={{ borderColor: withAlpha(brand.accentHex, 0.5) }} />
         </div>
-      ))}
-    </div>
-  )
-}
+      )}
 
-function IconFallback({ visual, accent }) {
-  return (
-    <div className="flex h-full w-full flex-col items-center justify-center gap-2 p-4 text-center">
-      <PhotoIcon className="h-10 w-10" style={{ color: accent }} />
-      <p className="text-xs text-white/40">{visual}</p>
-    </div>
-  )
-}
-
-function Slide({ slide, brand }) {
-  return (
-    <div
-      className="flex aspect-video w-full flex-col overflow-hidden rounded-2xl border border-white/10 sm:flex-row"
-      style={{ background: brand.primaryHex }}
-    >
-      <div className="flex min-w-0 flex-1 flex-col justify-between p-5 sm:p-7">
-        <div className="min-w-0">
-          <span
-            className="inline-block rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-white/80"
-            style={{ background: `${brand.accentHex}33` }}
-          >
-            {slide.visual}
-          </span>
-          <h2 className="mt-3 line-clamp-2 font-display text-xl font-semibold leading-snug text-white sm:text-2xl">
-            {slide.title}
-          </h2>
-          <p className="mt-2 line-clamp-2 text-sm text-white/70">{slide.takeaway}</p>
-        </div>
-
-        <ul className="mt-4 space-y-1.5 overflow-hidden">
-          {(slide.bullets || []).slice(0, 6).map((b, i) => (
-            <li key={i} className="flex gap-2 text-xs text-white/85 sm:text-sm">
-              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full" style={{ background: brand.accentHex }} />
-              <span className="line-clamp-2 break-words">{b}</span>
-            </li>
-          ))}
-        </ul>
-
-        {slide.transition && (
-          <p className="mt-4 line-clamp-1 border-t border-white/10 pt-2.5 text-[11px] italic text-white/35">
-            {slide.transition}
-          </p>
-        )}
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <Layout data={slide.data || {}} brand={brand} />
       </div>
 
-      <div className="h-32 w-full shrink-0 border-t border-white/10 sm:h-auto sm:w-2/5 sm:border-l sm:border-t-0" style={{ background: `${brand.secondaryHex}55` }}>
-        {slide.imageUrl ? (
-          <img src={slide.imageUrl} alt="" className="h-full w-full object-cover" />
-        ) : slide.chartPoints?.length > 0 ? (
-          <ChartFallback points={slide.chartPoints} accent={brand.accentHex} />
-        ) : (
-          <IconFallback visual={slide.visual} accent={brand.accentHex} />
-        )}
+      <div className="mt-2 flex shrink-0 items-center justify-between text-[9px] text-neutral-300">
+        <span className="line-clamp-1">{deckTitle}</span>
+        <span>{index + 1} / {total}</span>
       </div>
     </div>
   )
 }
 
-export default function SlideViewer({ slides, brand }) {
+export default function SlideViewer({ slides, brand, deckTitle, logoUrl }) {
   const [index, setIndex] = useState(0)
 
   useEffect(() => {
@@ -109,7 +72,7 @@ export default function SlideViewer({ slides, brand }) {
             exit={{ opacity: 0, x: -16 }}
             transition={{ duration: 0.25 }}
           >
-            <Slide slide={slide} brand={brand} />
+            <Slide slide={slide} brand={brand} deckTitle={deckTitle} logoUrl={logoUrl} index={index} total={slides.length} />
           </motion.div>
         </AnimatePresence>
       </div>
@@ -146,6 +109,9 @@ export default function SlideViewer({ slides, brand }) {
         <p className="mt-3 rounded-xl bg-white/[0.03] px-4 py-2.5 text-xs italic leading-relaxed text-white/45">
           <span className="not-italic font-medium text-white/60">Speaker notes · </span>{slide.speakerNotes}
         </p>
+      )}
+      {slide.transition && (
+        <p className="mt-1.5 px-1 text-[11px] text-white/30">→ {slide.transition}</p>
       )}
     </div>
   )

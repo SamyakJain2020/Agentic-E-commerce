@@ -8,9 +8,9 @@ import hashlib
 import io
 import json
 import os
-import re
 import secrets
 import time
+from urllib.parse import urlparse
 
 import requests
 from pypdf import PdfReader
@@ -108,6 +108,31 @@ def _uploads_as_text(session_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Company logo (unavatar.io — free, no key; Clearbit's own logo API was
+# deprecated in 2024, so this aggregates favicon/social sources instead)
+# ---------------------------------------------------------------------------
+
+def get_domain_logo(url: str):
+    if not url:
+        return None
+    domain = url.strip()
+    if not domain.startswith("http"):
+        domain = f"https://{domain}"
+    try:
+        domain = urlparse(domain).netloc or urlparse(domain).path
+        domain = domain.replace("www.", "").strip("/")
+        if not domain or "." not in domain:
+            return None
+        logo_url = f"https://unavatar.io/{domain}?fallback=false"
+        resp = requests.head(logo_url, timeout=6, allow_redirects=True)
+        if resp.status_code == 200:
+            return logo_url
+    except requests.RequestException:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Free image search (Wikimedia Commons — no API key required)
 # ---------------------------------------------------------------------------
 
@@ -135,31 +160,6 @@ def search_free_image(query: str):
     except requests.RequestException:
         pass
     return None
-
-
-# ---------------------------------------------------------------------------
-# Deterministic chart fallback: pull numbers out of bullets so a slide with
-# no photo still gets a real, on-brand, non-overflowing visual instead of a
-# hallucinated image.
-# ---------------------------------------------------------------------------
-
-_METRIC_RE = re.compile(r"([-+]?\d[\d,]*\.?\d*)\s*(%|percent)?")
-
-
-def _extract_chart_points(bullets):
-    points = []
-    for b in bullets or []:
-        m = _METRIC_RE.search(b)
-        if not m:
-            continue
-        raw = m.group(1).replace(",", "")
-        try:
-            value = float(raw)
-        except ValueError:
-            continue
-        label = b.split(",")[0].split(".")[0][:40]
-        points.append({"label": label, "value": value, "isPercent": bool(m.group(2))})
-    return points[:5]
 
 
 # ---------------------------------------------------------------------------
@@ -312,19 +312,37 @@ def create_blank_presentation(title: str):
     return resp.json()["design"]
 
 
+def _flatten_slide_text(slide: dict):
+    """Pull every short text value out of a slide's (layout-specific) data
+    blob, in roughly reading order, for template autofill mapping."""
+    out = [slide.get("title", ""), slide.get("subtitle", "")]
+    d = slide.get("data") or {}
+
+    def walk(value):
+        if isinstance(value, str):
+            if value and value.lower() not in ("photo", "bullet-panels"):
+                out.append(value)
+        elif isinstance(value, dict):
+            for v in value.values():
+                walk(v)
+        elif isinstance(value, list):
+            for v in value:
+                walk(v)
+
+    walk(d)
+    return [v for v in out if v]
+
+
 def _map_slide_to_dataset_fields(dataset: dict, slide: dict):
     """Best-effort mapping: match slide plan fields onto whatever text/image
     fields the chosen brand template's dataset actually exposes."""
     data = {}
     field_names = list(dataset.keys())
     text_fields = [f for f in field_names if dataset[f].get("type") == "text"]
-
-    ordered_values = [slide.get("title", "")]
-    ordered_values.append(slide.get("takeaway", ""))
-    ordered_values.extend(slide.get("bullets", []))
+    ordered_values = _flatten_slide_text(slide)
 
     for i, field_name in enumerate(text_fields):
-        if i < len(ordered_values) and ordered_values[i]:
+        if i < len(ordered_values):
             data[field_name] = {"type": "text", "text": str(ordered_values[i])[:500]}
     return data
 
@@ -333,8 +351,49 @@ def _map_slide_to_dataset_fields(dataset: dict, slide: dict):
 # Gemini Pro: brand extraction + narrative slide plan
 # ---------------------------------------------------------------------------
 
-SLIDE_JSON_SHAPE = """{
-  "brand": {
+LAYOUTS_SPEC = """Every slide must pick exactly ONE "layout" from this list, matching layout to content —
+never default everything to bullet lists. Each layout has its own "data" shape:
+
+1. "stat-grid" — 4 to 8 KPI tiles. data: {"stats": [{"value": "96.7", "label": "STUDENTS PER TEACHER",
+   "caption": "optional sub-caption", "hero": false, "delta": "optional e.g. +15.7%"}]}. Use "hero": true
+   for at most 2 stats that should render larger/emphasized. Use for KPI dashboards, "by the numbers" slides.
+
+2. "comparison-columns" — 2 to 4 side-by-side cards, each with a colored header and key:value rows.
+   data: {"columns": [{"heading": "APSEZ — Adani Ports", "rows": [{"label": "Network", "value": "15 domestic
+   ports + Haifa + NQXT"}]}]}. Use for comparing entities, options, competitors, before/after.
+
+3. "table" — a grouped, color-banded data table. data: {"headers": ["Objective","KPI","Target","Initiative"],
+   "groups": [{"label": "FINANCIAL PERSPECTIVE", "rows": [["Revenue growth","Revenue CAGR","25% FY26-28",
+   "Tier 2/3 expansion"]]}]}. Use for scorecards, financial reports, structured multi-row comparisons.
+
+4. "timeline" — 4 to 8 chronological milestones on a connector line. data: {"milestones": [{"marker": "1",
+   "dateLabel": "2010/11", "title": "BRAND ESTABLISHMENT", "body": "Founded by X to do Y; first result Z."}]}.
+   Use for history, roadmaps, phased plans.
+
+5. "matrix-2x2" — a strategic 2x2 (never more, never fewer than 4 quadrants). data: {"xLabel": "Effort",
+   "yLabel": "Impact", "quadrants": [{"title": "Eliminate", "bullets": ["...", "..."]}, {"title": "Raise",
+   "bullets": [...]}, {"title": "Reduce", "bullets": [...]}, {"title": "Create", "bullets": [...]}]}
+   (order: top-left, top-right, bottom-left, bottom-right). Use for ERRC grids, prioritization, positioning.
+
+6. "bullet-panels" — 2 to 4 boxed panels of bullets (e.g. company-overview style facts), optionally with one
+   photo. data: {"panels": [{"heading": "Key Activities", "bullets": ["...", "..."]}], "factRows":
+   [{"label": "Founded", "value": "2010"}], "imageQuery": "optional 2-5 word photo search phrase"}.
+   factRows is optional — use it for a compact key:value fact box (Founded/HQ/Sector/etc).
+
+7. "metrics-viz" — one chart. data: {"vizType": "donut", "segments": [{"label": "Product", "value": 62.5}]}
+   OR {"vizType": "bars", "bars": [{"label": "Total Revenue", "value": 39, "isPercent": true}]}. Values in
+   a donut should sum to ~100. Use for revenue mix, allocation, progress-against-target bars.
+
+8. "big-statement" — a section-divider / big-idea slide. data: {"statement": "<= 90 chars, the one big
+   idea", "subtext": "<= 140 chars supporting line"}. Use sparingly (openers, section breaks, the ask/CTA).
+
+9. "photo-feature" — narrative slide: title + 3-6 short bullets + one real photo. data: {"bullets": [...],
+   "imageQuery": "2-5 word photographable search phrase"}. Use only when no structured layout above fits.
+"""
+
+SLIDE_JSON_SHAPE = f"""{{
+  "deckTitle": "overall deck title, <= 70 chars",
+  "brand": {{
     "primaryHex": "#RRGGBB",
     "secondaryHex": "#RRGGBB",
     "accentHex": "#RRGGBB",
@@ -342,42 +401,52 @@ SLIDE_JSON_SHAPE = """{
     "bodyFont": "string",
     "tone": "string, e.g. Bold Tech / Minimalist Corporate / Modern Organic",
     "aesthetic": "one short phrase"
-  },
+  }},
   "slides": [
-    {
+    {{
+      "sectionTag": "e.g. SECTION 01 (short, or empty string)",
       "title": "Action/insight-driven title, <= 60 chars",
-      "takeaway": "one sentence core takeaway, <= 110 chars",
-      "bullets": ["3 to 6 bullets, EACH <= 90 characters, each carrying a hard metric or structured point"],
-      "visual": "exact visual type, e.g. '2x2 matrix', 'clustered bar chart', 'swimlane diagram', 'photo'",
-      "imageQuery": "a short, concrete, photographable search phrase for this slide's visual (2-5 words)",
-      "transition": "one short sentence bridging THIS slide to the NEXT (omit reasonably on the last slide)",
+      "subtitle": "optional italic byline under the title, <= 140 chars, or empty string",
+      "layout": "one of: stat-grid | comparison-columns | table | timeline | matrix-2x2 | bullet-panels | metrics-viz | big-statement | photo-feature",
+      "data": {{ ...shape depends on layout, see spec... }},
+      "transition": "one short sentence bridging THIS slide to the NEXT (empty string on the last slide)",
       "speakerNotes": "2-3 sentences of spoken narration for this slide"
-    }
+    }}
   ]
-}"""
+}}"""
 
 EXTRACTION_PROMPT = f"""You are the analysis engine for SlideCraft AI, a system that turns raw business
-analysis into a dense, brand-aligned slide deck (2 to 5 slides) that reads as ONE continuous narrative,
-not a pile of disconnected facts.
+analysis into a dense, information-heavy, brand-aligned slide deck that reads as ONE continuous narrative —
+built at the level of a professionally designed McKinsey/BCG-style corporate deck, not a generic AI slide.
 
 Given the shopper-provided ANALYSIS, SOURCE DOCUMENTS, and (optionally) a COMPANY URL, produce a single
 JSON object with this exact shape:
 
 {SLIDE_JSON_SHAPE}
 
-Hard rules (violating these breaks the renderer — a fixed-size 16:9 card with no scrolling):
-- 2 to 5 slides total, never more, never fewer than 2.
-- Title <= 60 characters. Takeaway <= 110 characters. EVERY bullet <= 90 characters — shorten by cutting
-  words, never by continuing onto an implied second line.
-- Exactly 3 to 6 bullets per slide. Never write a paragraph inside a bullet.
-- Every bullet must carry a concrete number, metric, or structured claim — reject vague marketing language.
-- The slides must have a narrative arc: each "transition" sentence should logically hand off to the next
-  slide's topic (situation -> complication -> data -> recommendation is a good default arc). The last slide
-  usually needs no transition (use "").
+LAYOUT LIBRARY (pick deliberately per slide, mix layouts across the deck — do not use the same layout for
+every slide; a good deck usually opens with big-statement or bullet-panels (company overview), has 1-2
+stat-grid or metrics-viz slides, a timeline if there's any chronology, a table for financial/KPI detail,
+a matrix-2x2 if there's a strategic framework, and closes with big-statement or comparison-columns):
+
+{LAYOUTS_SPEC}
+
+Hard rules (violating these breaks the renderer — every slide is a fixed-size 16:9 card with no scrolling):
+- SLIDE COUNT: read the ANALYSIS text for an explicit instruction (e.g. "10 slides", "make it 6 slides",
+  "a 3 slide deck") and produce EXACTLY that many. If no count is specified, choose the count that best
+  fits the content's richness — typically 6 to 10 slides for a dense corporate deck. Never pad with filler
+  slides just to hit a number, and never truncate real content to avoid making more slides.
+- Title <= 60 characters. Subtitle <= 140 characters. Every bullet/value/label field described in the
+  layout spec must fit on ONE line at its slide position — keep every string SHORT; cut words, don't wrap.
+- Every stat, bullet, table cell, and chart value must carry a concrete number, metric, or structured
+  claim drawn from the ANALYSIS/SOURCE DOCUMENTS — reject vague marketing language. Never invent numbers
+  that aren't grounded in the input; if a real number isn't available for a slot, omit that item instead.
+- The deck must have a narrative arc: each "transition" sentence should logically hand off to the next
+  slide's topic. The last slide usually needs no transition (use "").
 - If no brand URL/colors are discoverable, default to primaryHex #0f172a, secondaryHex #475569,
   accentHex #6366f1, headerFont Inter, bodyFont Inter, tone "Modern Corporate Neutral".
-- "imageQuery" must describe something a stock-photo/encyclopedia search would actually return (e.g.
-  "espresso machine barista", "warehouse logistics conveyor") — never an abstract concept like "growth".
+- "imageQuery" fields must describe something a stock-photo/encyclopedia search would actually return
+  (e.g. "espresso machine barista", "warehouse logistics conveyor") — never an abstract concept like "growth".
 - Return ONLY the JSON object, no markdown fences, no commentary.
 """
 
@@ -385,16 +454,21 @@ REVISE_PROMPT = f"""You are SlideCraft AI's revision engine. The user already ha
 below as CURRENT_DECK) and is asking for a specific change via chat, optionally attaching NEW_DOCUMENTS.
 
 Apply ONLY the requested change(s) — keep everything else in the deck stable unless the request implies a
-broader rework. Return a single JSON object with this exact shape:
+broader rework (e.g. "make it 10 slides" means you should add/split slides; "add a slide on X" means insert
+one in the right narrative position). Return a single JSON object with this exact shape:
 
 {{
   "reply": "a short (1-3 sentence) conversational confirmation of what you changed",
+  "deckTitle": "...",
   "brand": {{ ...same shape as before... }},
-  "slides": [ ...same shape as before, full updated slide array, still 2-5 slides... ]
+  "slides": [ ...same shape as before, full updated slide array... ]
 }}
 
-The same hard density/overflow rules from deck generation still apply: title <= 60 chars, takeaway <= 110
-chars, 3-6 bullets each <= 90 chars, a coherent transition arc. Return ONLY the JSON object.
+{LAYOUTS_SPEC}
+
+The same hard density/overflow/grounding rules from deck generation still apply — short fields only, real
+numbers only, a coherent transition arc, and use the full layout library rather than defaulting to bullets.
+Return ONLY the JSON object.
 """
 
 
@@ -407,7 +481,7 @@ def _call_gemini_json(system_prompt: str, user_prompt: str, api_key: str) -> dic
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
             "generationConfig": {"response_mime_type": "application/json"},
         },
-        timeout=60,
+        timeout=90,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -418,12 +492,11 @@ def _call_gemini_json(system_prompt: str, user_prompt: str, api_key: str) -> dic
 
 def _enrich_slides_with_visuals(slides):
     for slide in slides:
-        image_url = search_free_image(slide.get("imageQuery") or slide.get("title", ""))
-        slide["imageUrl"] = image_url
-        if not image_url:
-            slide["chartPoints"] = _extract_chart_points(slide.get("bullets"))
-        else:
-            slide["chartPoints"] = []
+        d = slide.get("data") or {}
+        query = d.get("imageQuery")
+        if slide.get("layout") in ("photo-feature", "bullet-panels") and query:
+            d["imageUrl"] = search_free_image(query)
+        slide["data"] = d
     return slides
 
 
@@ -436,11 +509,12 @@ def extract_brand_and_plan(analysis_text: str, source_text: str, url: str, api_k
     parsed = _call_gemini_json(EXTRACTION_PROMPT, prompt, api_key)
 
     brand = {**DEFAULT_BRAND, **(parsed.get("brand") or {})}
-    slides = (parsed.get("slides") or [])[:5]
-    if len(slides) < 2:
-        raise ValueError("Gemini returned fewer than 2 slides")
+    slides = parsed.get("slides") or []
+    if len(slides) < 1:
+        raise ValueError("Gemini returned no slides")
     _enrich_slides_with_visuals(slides)
-    return brand, slides
+    deck_title = parsed.get("deckTitle") or (slides[0].get("title") if slides else "Untitled deck")
+    return brand, slides, deck_title
 
 
 # ---------------------------------------------------------------------------
@@ -514,13 +588,15 @@ def _run_canva_pipeline(slides):
 
 def generate_deck(session_id: str, analysis_text: str, source_text: str, url: str, api_key: str):
     merged_source = "\n\n".join(filter(None, [source_text, _uploads_as_text(session_id)]))
-    brand, slides = extract_brand_and_plan(analysis_text, merged_source, url, api_key)
+    brand, slides, deck_title = extract_brand_and_plan(analysis_text, merged_source, url, api_key)
     canva = _run_canva_pipeline(slides)
 
     deck = {
         "analysisText": analysis_text,
         "sourceText": source_text,
         "url": url,
+        "deckTitle": deck_title,
+        "logoUrl": get_domain_logo(url),
         "brand": brand,
         "slides": slides,
         "canva": canva,
@@ -540,9 +616,11 @@ def revise_deck(session_id: str, message: str, api_key: str):
         raise ValueError("No deck found for this session yet — generate one first.")
 
     new_docs_text = _uploads_as_text(session_id)
-    current = {"brand": deck["brand"], "slides": [
-        {k: v for k, v in s.items() if k not in ("imageUrl", "chartPoints")} for s in deck["slides"]
-    ]}
+    current = {
+        "deckTitle": deck.get("deckTitle"),
+        "brand": deck["brand"],
+        "slides": [{k: v for k, v in s.items() if k != "data"} | {"data": {k: v for k, v in (s.get("data") or {}).items() if k != "imageUrl"}} for s in deck["slides"]],
+    }
     prompt = (
         f"CURRENT_DECK:\n{json.dumps(current)}\n\n"
         f"USER REQUEST:\n{message}\n\n"
@@ -551,13 +629,14 @@ def revise_deck(session_id: str, message: str, api_key: str):
     parsed = _call_gemini_json(REVISE_PROMPT, prompt, api_key)
 
     brand = {**deck["brand"], **(parsed.get("brand") or {})}
-    slides = (parsed.get("slides") or deck["slides"])[:5]
-    if len(slides) < 2:
-        raise ValueError("Revision produced fewer than 2 slides")
+    slides = parsed.get("slides") or deck["slides"]
+    if len(slides) < 1:
+        raise ValueError("Revision produced no slides")
     _enrich_slides_with_visuals(slides)
 
     deck["brand"] = brand
     deck["slides"] = slides
+    deck["deckTitle"] = parsed.get("deckTitle", deck.get("deckTitle"))
     deck["chatHistory"].append({"role": "user", "text": message})
     deck["chatHistory"].append({"role": "assistant", "text": parsed.get("reply", "Updated the deck.")})
     return deck, parsed.get("reply", "Updated the deck.")
