@@ -5,12 +5,16 @@ by combining Gemini Pro (extraction/reasoning) with the Canva Connect API
 """
 import base64
 import hashlib
+import io
 import json
 import os
+import re
 import secrets
 import time
 
 import requests
+from pypdf import PdfReader
+from docx import Document as DocxDocument
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
@@ -25,7 +29,27 @@ CANVA_SCOPES = "design:content:write design:meta:read brandtemplate:meta:read br
 # Single-tenant demo: one Canva connection (the site owner's), not per-visitor.
 # PKCE verifiers are short-lived and keyed by the OAuth `state` param.
 _PKCE_STORE = {}
-CANVA_TOKENS = {"access_token": None, "refresh_token": None, "expires_at": 0}
+_TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".canva_tokens.json")
+
+
+def _load_tokens():
+    try:
+        with open(_TOKEN_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"access_token": None, "refresh_token": None, "expires_at": 0}
+
+
+def _save_tokens():
+    try:
+        with open(_TOKEN_FILE, "w") as f:
+            json.dump(CANVA_TOKENS, f)
+        os.chmod(_TOKEN_FILE, 0o600)
+    except OSError:
+        pass
+
+
+CANVA_TOKENS = _load_tokens()
 
 DEFAULT_BRAND = {
     "primaryHex": "#0f172a",
@@ -36,6 +60,106 @@ DEFAULT_BRAND = {
     "tone": "Modern Corporate Neutral",
     "aesthetic": "Minimalist Corporate",
 }
+
+MAX_DOC_CHARS = 20000  # per-file cap so one huge PDF can't blow the Gemini prompt budget
+
+# session_id -> [{"filename": str, "text": str, "chars": int}]
+UPLOADS = {}
+# session_id -> {"analysisText", "sourceText", "url", "brand", "slides", "canva", "chatHistory"}
+DECKS = {}
+
+
+# ---------------------------------------------------------------------------
+# Document upload: text extraction (PDF / DOCX / TXT / MD)
+# ---------------------------------------------------------------------------
+
+def extract_text_from_upload(filename: str, raw: bytes) -> str:
+    name = (filename or "").lower()
+    try:
+        if name.endswith(".pdf"):
+            reader = PdfReader(io.BytesIO(raw))
+            text = "\n".join((page.extract_text() or "") for page in reader.pages)
+        elif name.endswith(".docx"):
+            doc = DocxDocument(io.BytesIO(raw))
+            text = "\n".join(p.text for p in doc.paragraphs)
+        else:
+            text = raw.decode("utf-8", errors="ignore")
+    except Exception as e:
+        text = f"[Could not extract text from {filename}: {e}]"
+    return text.strip()[:MAX_DOC_CHARS]
+
+
+def add_upload(session_id: str, filename: str, raw: bytes):
+    text = extract_text_from_upload(filename, raw)
+    entry = {"filename": filename, "text": text, "chars": len(text)}
+    UPLOADS.setdefault(session_id, []).append(entry)
+    return entry
+
+
+def list_uploads(session_id: str):
+    return [{"filename": u["filename"], "chars": u["chars"]} for u in UPLOADS.get(session_id, [])]
+
+
+def _uploads_as_text(session_id: str) -> str:
+    docs = UPLOADS.get(session_id, [])
+    if not docs:
+        return ""
+    return "\n\n".join(f"--- {d['filename']} ---\n{d['text']}" for d in docs)
+
+
+# ---------------------------------------------------------------------------
+# Free image search (Wikimedia Commons — no API key required)
+# ---------------------------------------------------------------------------
+
+def search_free_image(query: str):
+    try:
+        resp = requests.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params={
+                "action": "query", "format": "json", "generator": "search",
+                "gsrnamespace": 6, "gsrsearch": f"{query} filetype:bitmap",
+                "gsrlimit": 3, "prop": "imageinfo", "iiprop": "url|mime",
+                "iiurlwidth": 900,
+            },
+            headers={"User-Agent": "SlideCraftAI/1.0 (https://samyak-jain.tech)"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        pages = (resp.json().get("query") or {}).get("pages") or {}
+        for page in pages.values():
+            info = (page.get("imageinfo") or [{}])[0]
+            mime = info.get("mime", "")
+            url = info.get("thumburl") or info.get("url")
+            if url and mime.startswith("image/") and "svg" not in mime:
+                return url
+    except requests.RequestException:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Deterministic chart fallback: pull numbers out of bullets so a slide with
+# no photo still gets a real, on-brand, non-overflowing visual instead of a
+# hallucinated image.
+# ---------------------------------------------------------------------------
+
+_METRIC_RE = re.compile(r"([-+]?\d[\d,]*\.?\d*)\s*(%|percent)?")
+
+
+def _extract_chart_points(bullets):
+    points = []
+    for b in bullets or []:
+        m = _METRIC_RE.search(b)
+        if not m:
+            continue
+        raw = m.group(1).replace(",", "")
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        label = b.split(",")[0].split(".")[0][:40]
+        points.append({"label": label, "value": value, "isPercent": bool(m.group(2))})
+    return points[:5]
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +212,7 @@ def exchange_code(code: str, state: str, redirect_uri: str):
     CANVA_TOKENS["access_token"] = payload["access_token"]
     CANVA_TOKENS["refresh_token"] = payload.get("refresh_token")
     CANVA_TOKENS["expires_at"] = time.time() + payload.get("expires_in", 3600) - 60
+    _save_tokens()
     return payload
 
 
@@ -114,6 +239,7 @@ def _refresh_if_needed():
         CANVA_TOKENS["access_token"] = payload["access_token"]
         CANVA_TOKENS["refresh_token"] = payload.get("refresh_token", CANVA_TOKENS["refresh_token"])
         CANVA_TOKENS["expires_at"] = time.time() + payload.get("expires_in", 3600) - 60
+        _save_tokens()
 
 
 def is_connected() -> bool:
@@ -207,13 +333,7 @@ def _map_slide_to_dataset_fields(dataset: dict, slide: dict):
 # Gemini Pro: brand extraction + narrative slide plan
 # ---------------------------------------------------------------------------
 
-EXTRACTION_PROMPT = """You are the analysis engine for SlideCraft AI, a system that turns raw business
-analysis into a dense, brand-aligned slide deck (2 to 5 slides).
-
-Given the shopper-provided ANALYSIS, SOURCE DOCUMENTS, and (optionally) a COMPANY URL, produce a single
-JSON object with this exact shape:
-
-{
+SLIDE_JSON_SHAPE = """{
   "brand": {
     "primaryHex": "#RRGGBB",
     "secondaryHex": "#RRGGBB",
@@ -225,22 +345,86 @@ JSON object with this exact shape:
   },
   "slides": [
     {
-      "title": "Action/insight-driven title, <= 65 chars",
-      "takeaway": "one sentence core takeaway",
-      "bullets": ["3 to 6 bullets, each with a hard metric or structured point — no generic filler"],
-      "visual": "exact visual type, e.g. '2x2 matrix', 'clustered bar chart', 'swimlane diagram'",
-      "speakerNotes": "2-3 sentences"
+      "title": "Action/insight-driven title, <= 60 chars",
+      "takeaway": "one sentence core takeaway, <= 110 chars",
+      "bullets": ["3 to 6 bullets, EACH <= 90 characters, each carrying a hard metric or structured point"],
+      "visual": "exact visual type, e.g. '2x2 matrix', 'clustered bar chart', 'swimlane diagram', 'photo'",
+      "imageQuery": "a short, concrete, photographable search phrase for this slide's visual (2-5 words)",
+      "transition": "one short sentence bridging THIS slide to the NEXT (omit reasonably on the last slide)",
+      "speakerNotes": "2-3 sentences of spoken narration for this slide"
     }
   ]
-}
+}"""
 
-Rules:
+EXTRACTION_PROMPT = f"""You are the analysis engine for SlideCraft AI, a system that turns raw business
+analysis into a dense, brand-aligned slide deck (2 to 5 slides) that reads as ONE continuous narrative,
+not a pile of disconnected facts.
+
+Given the shopper-provided ANALYSIS, SOURCE DOCUMENTS, and (optionally) a COMPANY URL, produce a single
+JSON object with this exact shape:
+
+{SLIDE_JSON_SHAPE}
+
+Hard rules (violating these breaks the renderer — a fixed-size 16:9 card with no scrolling):
 - 2 to 5 slides total, never more, never fewer than 2.
+- Title <= 60 characters. Takeaway <= 110 characters. EVERY bullet <= 90 characters — shorten by cutting
+  words, never by continuing onto an implied second line.
+- Exactly 3 to 6 bullets per slide. Never write a paragraph inside a bullet.
+- Every bullet must carry a concrete number, metric, or structured claim — reject vague marketing language.
+- The slides must have a narrative arc: each "transition" sentence should logically hand off to the next
+  slide's topic (situation -> complication -> data -> recommendation is a good default arc). The last slide
+  usually needs no transition (use "").
 - If no brand URL/colors are discoverable, default to primaryHex #0f172a, secondaryHex #475569,
   accentHex #6366f1, headerFont Inter, bodyFont Inter, tone "Modern Corporate Neutral".
-- Every bullet must carry a concrete number, metric, or structured claim — reject vague marketing language.
+- "imageQuery" must describe something a stock-photo/encyclopedia search would actually return (e.g.
+  "espresso machine barista", "warehouse logistics conveyor") — never an abstract concept like "growth".
 - Return ONLY the JSON object, no markdown fences, no commentary.
 """
+
+REVISE_PROMPT = f"""You are SlideCraft AI's revision engine. The user already has a generated deck (given
+below as CURRENT_DECK) and is asking for a specific change via chat, optionally attaching NEW_DOCUMENTS.
+
+Apply ONLY the requested change(s) — keep everything else in the deck stable unless the request implies a
+broader rework. Return a single JSON object with this exact shape:
+
+{{
+  "reply": "a short (1-3 sentence) conversational confirmation of what you changed",
+  "brand": {{ ...same shape as before... }},
+  "slides": [ ...same shape as before, full updated slide array, still 2-5 slides... ]
+}}
+
+The same hard density/overflow rules from deck generation still apply: title <= 60 chars, takeaway <= 110
+chars, 3-6 bullets each <= 90 chars, a coherent transition arc. Return ONLY the JSON object.
+"""
+
+
+def _call_gemini_json(system_prompt: str, user_prompt: str, api_key: str) -> dict:
+    resp = requests.post(
+        GEMINI_URL,
+        headers={"Content-Type": "application/json", "X-goog-api-key": api_key},
+        json={
+            "system_instruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+            "generationConfig": {"response_mime_type": "application/json"},
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    parts = data["candidates"][0]["content"]["parts"]
+    text = "".join(p.get("text", "") for p in parts)
+    return json.loads(text)
+
+
+def _enrich_slides_with_visuals(slides):
+    for slide in slides:
+        image_url = search_free_image(slide.get("imageQuery") or slide.get("title", ""))
+        slide["imageUrl"] = image_url
+        if not image_url:
+            slide["chartPoints"] = _extract_chart_points(slide.get("bullets"))
+        else:
+            slide["chartPoints"] = []
+    return slides
 
 
 def extract_brand_and_plan(analysis_text: str, source_text: str, url: str, api_key: str):
@@ -249,26 +433,13 @@ def extract_brand_and_plan(analysis_text: str, source_text: str, url: str, api_k
         f"SOURCE DOCUMENTS:\n{source_text or '(none provided)'}\n\n"
         f"COMPANY URL:\n{url or '(none provided)'}"
     )
-    resp = requests.post(
-        GEMINI_URL,
-        headers={"Content-Type": "application/json", "X-goog-api-key": api_key},
-        json={
-            "system_instruction": {"parts": [{"text": EXTRACTION_PROMPT}]},
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {"response_mime_type": "application/json"},
-        },
-        timeout=45,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    parts = data["candidates"][0]["content"]["parts"]
-    text = "".join(p.get("text", "") for p in parts)
-    parsed = json.loads(text)
+    parsed = _call_gemini_json(EXTRACTION_PROMPT, prompt, api_key)
 
     brand = {**DEFAULT_BRAND, **(parsed.get("brand") or {})}
     slides = (parsed.get("slides") or [])[:5]
     if len(slides) < 2:
         raise ValueError("Gemini returned fewer than 2 slides")
+    _enrich_slides_with_visuals(slides)
     return brand, slides
 
 
@@ -276,73 +447,125 @@ def extract_brand_and_plan(analysis_text: str, source_text: str, url: str, api_k
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def generate_deck(analysis_text: str, source_text: str, url: str, api_key: str):
-    brand, slides = extract_brand_and_plan(analysis_text, source_text, url, api_key)
-
-    result = {
-        "brand": brand,
-        "slides": slides,
-        "canva": {"connected": is_connected(), "mode": None, "templates": [], "design": None, "warning": None},
-    }
+def _run_canva_pipeline(slides):
+    canva = {"connected": is_connected(), "mode": None, "templates": [], "design": None, "warning": None}
 
     if not is_connected():
-        result["canva"]["warning"] = "Canva isn't connected yet — showing the brand guide and slide plan only. Connect Canva to generate the actual deck."
-        return result
+        canva["warning"] = "Canva isn't connected yet — showing the brand guide and slide plan only. Connect Canva to generate the actual deck."
+        return canva
 
     try:
         templates = list_brand_templates()
     except requests.RequestException as e:
-        result["canva"]["warning"] = f"Couldn't reach Canva's Brand Template API: {e}"
-        return result
+        canva["warning"] = f"Couldn't reach Canva's Brand Template API: {e}"
+        return canva
 
     if not templates:
-        # Spec'd fallback: no usable Brand Template dataset -> blank presentation via native engine.
         try:
             design = create_blank_presentation(f"SlideCraft AI — {slides[0]['title']}")
-            result["canva"]["mode"] = "fallback_blank_presentation"
-            result["canva"]["design"] = design
-            result["canva"]["warning"] = (
+            canva["mode"] = "fallback_blank_presentation"
+            canva["design"] = design
+            canva["warning"] = (
                 "Your Canva account has no Brand Templates (Brand Templates are an Enterprise/Teams "
                 "governance feature, not part of individual Canva Pro) — created a blank presentation "
                 "design instead, matched to your brand colors below. Finish it in Canva."
             )
         except requests.RequestException as e:
-            result["canva"]["warning"] = f"No Brand Templates found, and the fallback design create failed: {e}"
-        return result
+            canva["warning"] = f"No Brand Templates found, and the fallback design create failed: {e}"
+        return canva
 
     chosen = templates[:3]
-    result["canva"]["templates"] = [{"id": t.get("id"), "title": t.get("title")} for t in chosen]
+    canva["templates"] = [{"id": t.get("id"), "title": t.get("title")} for t in chosen]
 
     primary_template = chosen[0]
     try:
         dataset = get_brand_template_dataset(primary_template["id"])
     except requests.RequestException as e:
-        result["canva"]["warning"] = f"Couldn't fetch the template's autofill schema: {e}"
-        return result
+        canva["warning"] = f"Couldn't fetch the template's autofill schema: {e}"
+        return canva
 
     if not dataset:
         try:
             design = create_blank_presentation(f"SlideCraft AI — {slides[0]['title']}")
-            result["canva"]["mode"] = "fallback_blank_presentation"
-            result["canva"]["design"] = design
-            result["canva"]["warning"] = "The selected Brand Template exposes no autofillable fields — created a blank presentation instead."
+            canva["mode"] = "fallback_blank_presentation"
+            canva["design"] = design
+            canva["warning"] = "The selected Brand Template exposes no autofillable fields — created a blank presentation instead."
         except requests.RequestException as e:
-            result["canva"]["warning"] = f"Empty template schema, and fallback design create failed: {e}"
-        return result
+            canva["warning"] = f"Empty template schema, and fallback design create failed: {e}"
+        return canva
 
     data = _map_slide_to_dataset_fields(dataset, slides[0])
     try:
         job = create_autofill_job(primary_template["id"], slides[0]["title"], data)
         final_job = poll_autofill_job(job["id"])
     except requests.RequestException as e:
-        result["canva"]["warning"] = f"Autofill request failed: {e}"
-        return result
+        canva["warning"] = f"Autofill request failed: {e}"
+        return canva
 
-    result["canva"]["mode"] = "brand_template_autofill"
-    result["canva"]["job"] = final_job
+    canva["mode"] = "brand_template_autofill"
+    canva["job"] = final_job
     if final_job.get("status") == "success":
-        result["canva"]["design"] = final_job["result"]["design"]
+        canva["design"] = final_job["result"]["design"]
     else:
-        result["canva"]["warning"] = f"Autofill job ended with status: {final_job.get('status')}"
+        canva["warning"] = f"Autofill job ended with status: {final_job.get('status')}"
 
-    return result
+    return canva
+
+
+def generate_deck(session_id: str, analysis_text: str, source_text: str, url: str, api_key: str):
+    merged_source = "\n\n".join(filter(None, [source_text, _uploads_as_text(session_id)]))
+    brand, slides = extract_brand_and_plan(analysis_text, merged_source, url, api_key)
+    canva = _run_canva_pipeline(slides)
+
+    deck = {
+        "analysisText": analysis_text,
+        "sourceText": source_text,
+        "url": url,
+        "brand": brand,
+        "slides": slides,
+        "canva": canva,
+        "chatHistory": [],
+    }
+    DECKS[session_id] = deck
+    return deck
+
+
+def get_deck(session_id: str):
+    return DECKS.get(session_id)
+
+
+def revise_deck(session_id: str, message: str, api_key: str):
+    deck = DECKS.get(session_id)
+    if not deck:
+        raise ValueError("No deck found for this session yet — generate one first.")
+
+    new_docs_text = _uploads_as_text(session_id)
+    current = {"brand": deck["brand"], "slides": [
+        {k: v for k, v in s.items() if k not in ("imageUrl", "chartPoints")} for s in deck["slides"]
+    ]}
+    prompt = (
+        f"CURRENT_DECK:\n{json.dumps(current)}\n\n"
+        f"USER REQUEST:\n{message}\n\n"
+        f"NEW_DOCUMENTS:\n{new_docs_text or '(none)'}"
+    )
+    parsed = _call_gemini_json(REVISE_PROMPT, prompt, api_key)
+
+    brand = {**deck["brand"], **(parsed.get("brand") or {})}
+    slides = (parsed.get("slides") or deck["slides"])[:5]
+    if len(slides) < 2:
+        raise ValueError("Revision produced fewer than 2 slides")
+    _enrich_slides_with_visuals(slides)
+
+    deck["brand"] = brand
+    deck["slides"] = slides
+    deck["chatHistory"].append({"role": "user", "text": message})
+    deck["chatHistory"].append({"role": "assistant", "text": parsed.get("reply", "Updated the deck.")})
+    return deck, parsed.get("reply", "Updated the deck.")
+
+
+def sync_deck_to_canva(session_id: str):
+    deck = DECKS.get(session_id)
+    if not deck:
+        raise ValueError("No deck found for this session yet — generate one first.")
+    deck["canva"] = _run_canva_pipeline(deck["slides"])
+    return deck["canva"]

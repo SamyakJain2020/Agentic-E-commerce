@@ -4,3 +4,5 @@ requests
 python-dotenv
 gunicorn
 razorpay
+pypdf
+python-docx

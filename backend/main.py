@@ -323,12 +323,36 @@ def slidecraft_auth_status():
     return jsonify({"connected": slidecraft.is_connected(), "configured": bool(slidecraft.CANVA_CLIENT_ID)})
 
 
+@app.route('/api/slidecraft/upload', methods=['POST'])
+def slidecraft_upload():
+    sid = _session_id()
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({"error": "no files uploaded (expected form field 'files')"}), 400
+    MAX_FILE_BYTES = 15 * 1024 * 1024
+    added = []
+    for f in files:
+        raw = f.read(MAX_FILE_BYTES + 1)
+        if len(raw) > MAX_FILE_BYTES:
+            return jsonify({"error": f"{f.filename} is over the 15MB limit"}), 400
+        entry = slidecraft.add_upload(sid, f.filename, raw)
+        added.append({"filename": entry["filename"], "chars": entry["chars"]})
+    return jsonify({"added": added, "uploads": slidecraft.list_uploads(sid)})
+
+
+@app.route('/api/slidecraft/uploads', methods=['GET'])
+def slidecraft_list_uploads():
+    sid = _session_id()
+    return jsonify({"uploads": slidecraft.list_uploads(sid)})
+
+
 @app.route('/api/slidecraft/generate', methods=['POST'])
 def slidecraft_generate():
     api_key = os.environ.get('GEMINI_API_KEY')
     if not api_key:
         return jsonify({"error": "Gemini isn't configured (missing GEMINI_API_KEY)."}), 500
 
+    sid = _session_id()
     body = request.get_json(force=True)
     analysis_text = (body.get('analysisText') or '').strip()
     source_text = (body.get('sourceText') or '').strip()
@@ -337,10 +361,48 @@ def slidecraft_generate():
         return jsonify({"error": "analysisText is required"}), 400
 
     try:
-        result = slidecraft.generate_deck(analysis_text, source_text, url, api_key)
+        result = slidecraft.generate_deck(sid, analysis_text, source_text, url, api_key)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     return jsonify(result)
+
+
+@app.route('/api/slidecraft/deck', methods=['GET'])
+def slidecraft_get_deck():
+    sid = _session_id()
+    deck = slidecraft.get_deck(sid)
+    if not deck:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(deck)
+
+
+@app.route('/api/slidecraft/chat', methods=['POST'])
+def slidecraft_chat():
+    api_key = os.environ.get('GEMINI_API_KEY')
+    if not api_key:
+        return jsonify({"error": "Gemini isn't configured (missing GEMINI_API_KEY)."}), 500
+
+    sid = _session_id()
+    body = request.get_json(force=True)
+    message = (body.get('message') or '').strip()
+    if not message:
+        return jsonify({"error": "message is required"}), 400
+
+    try:
+        deck, reply = slidecraft.revise_deck(sid, message, api_key)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"reply": reply, "brand": deck["brand"], "slides": deck["slides"]})
+
+
+@app.route('/api/slidecraft/canva/sync', methods=['POST'])
+def slidecraft_canva_sync():
+    sid = _session_id()
+    try:
+        canva = slidecraft.sync_deck_to_canva(sid)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"canva": canva})
 
 
 @app.route('/')
