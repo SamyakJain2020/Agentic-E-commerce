@@ -2,10 +2,11 @@ import hashlib
 import hmac
 import os
 import threading
+import urllib.parse
 import uuid
 import razorpay
 import requests as pyrequests
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -13,6 +14,7 @@ load_dotenv()
 
 import data
 import agent
+import slidecraft
 
 RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID')
 RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET')
@@ -20,6 +22,7 @@ razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)) i
 
 DIST_DIR = '/opt/app/frontend/dist'
 PORTFOLIO_DIST_DIR = '/opt/app/portfolio/dist'
+SLIDECRAFT_DIST_DIR = '/opt/app/slidecraft/dist'
 app = Flask(__name__, static_folder=None)
 CORS(app)
 
@@ -286,6 +289,60 @@ def voice_chat():
     return jsonify(result)
 
 
+# ---------- SlideCraft AI: Canva OAuth + deck generation ----------
+
+CANVA_REDIRECT_URI = 'https://samyak-jain.tech/api/slidecraft/auth/callback'
+
+
+@app.route('/api/slidecraft/auth/start')
+def slidecraft_auth_start():
+    if not slidecraft.CANVA_CLIENT_ID:
+        return jsonify({"error": "Canva isn't configured (missing CANVA_CLIENT_ID)."}), 500
+    url = slidecraft.build_authorize_url(CANVA_REDIRECT_URI)
+    return redirect(url)
+
+
+@app.route('/api/slidecraft/auth/callback')
+def slidecraft_auth_callback():
+    code = request.args.get('code')
+    state = request.args.get('state')
+    error = request.args.get('error')
+    if error:
+        return redirect(f'/slidecraft?canva_error={error}')
+    if not code or not state:
+        return redirect('/slidecraft?canva_error=missing_code')
+    try:
+        slidecraft.exchange_code(code, state, CANVA_REDIRECT_URI)
+    except Exception as e:
+        return redirect(f'/slidecraft?canva_error={urllib.parse.quote(str(e))}')
+    return redirect('/slidecraft?canva_connected=1')
+
+
+@app.route('/api/slidecraft/auth/status')
+def slidecraft_auth_status():
+    return jsonify({"connected": slidecraft.is_connected(), "configured": bool(slidecraft.CANVA_CLIENT_ID)})
+
+
+@app.route('/api/slidecraft/generate', methods=['POST'])
+def slidecraft_generate():
+    api_key = os.environ.get('GEMINI_API_KEY')
+    if not api_key:
+        return jsonify({"error": "Gemini isn't configured (missing GEMINI_API_KEY)."}), 500
+
+    body = request.get_json(force=True)
+    analysis_text = (body.get('analysisText') or '').strip()
+    source_text = (body.get('sourceText') or '').strip()
+    url = (body.get('url') or '').strip()
+    if not analysis_text:
+        return jsonify({"error": "analysisText is required"}), 400
+
+    try:
+        result = slidecraft.generate_deck(analysis_text, source_text, url, api_key)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify(result)
+
+
 @app.route('/')
 def serve_portfolio_root():
     return send_from_directory(PORTFOLIO_DIST_DIR, 'index.html')
@@ -302,6 +359,13 @@ def serve_static_assets(path):
         if sub and os.path.isfile(full):
             return send_from_directory(DIST_DIR, sub)
         return send_from_directory(DIST_DIR, 'index.html')
+
+    if path == 'slidecraft' or path.startswith('slidecraft/'):
+        sub = path[len('slidecraft/'):] if path.startswith('slidecraft/') else ''
+        full = os.path.join(SLIDECRAFT_DIST_DIR, sub)
+        if sub and os.path.isfile(full):
+            return send_from_directory(SLIDECRAFT_DIST_DIR, sub)
+        return send_from_directory(SLIDECRAFT_DIST_DIR, 'index.html')
 
     full = os.path.join(PORTFOLIO_DIST_DIR, path)
     if os.path.isfile(full):
