@@ -2,7 +2,13 @@ node_modules/
 dist/
 .env
 .env.local
+.canva_tokens.json
 __pycache__/
 *.pyc
+*.bak-*
 .DS_Store
 check_images.sh
+
+# binary / personal assets: kept in the private S3 bucket (agentic-shop/ prefix), restored by deploy/restore.sh
+*.mp4
+portfolio/public/Samyak_Jain_Resume.pdf

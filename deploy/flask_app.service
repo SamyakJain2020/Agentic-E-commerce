@@ -1,0 +1,13 @@
+[Unit]
+Description=samyak-jain.tech Flask server (portfolio, Aura, SlideCraft, Aurora, Fluxora)
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/opt/app/backend
+ExecStart=/opt/app/venv/bin/python main.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

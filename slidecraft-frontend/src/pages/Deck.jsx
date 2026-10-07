@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   ArrowLeftIcon, SwatchIcon, ArrowTopRightOnSquareIcon, ArrowPathIcon,
-  ExclamationTriangleIcon, LinkIcon,
+  ExclamationTriangleIcon, LinkIcon, ArrowDownTrayIcon,
 } from '@heroicons/react/24/outline'
 import { api } from '../api'
 import SlideViewer from '../components/SlideViewer'
@@ -12,6 +12,8 @@ export default function Deck() {
   const [deck, setDeck] = useState(null)
   const [error, setError] = useState(null)
   const [syncing, setSyncing] = useState(false)
+  const [downloading, setDownloading] = useState(false)
+  const [downloadError, setDownloadError] = useState(null)
 
   useEffect(() => {
     api.getDeck().then(setDeck).catch(() => setError('No deck yet — generate one first.'))
@@ -19,6 +21,18 @@ export default function Deck() {
 
   function onDeckUpdate(partial) {
     setDeck((d) => ({ ...d, ...partial }))
+  }
+
+  async function downloadPptx() {
+    setDownloading(true)
+    setDownloadError(null)
+    try {
+      await api.downloadPptx(deck.deckTitle)
+    } catch (e) {
+      setDownloadError(e.message)
+    } finally {
+      setDownloading(false)
+    }
   }
 
   async function syncCanva() {
@@ -57,13 +71,21 @@ export default function Deck() {
           <span className="flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs text-white/70">
             <SwatchIcon className="h-3.5 w-3.5" style={{ color: deck.brand.accentHex }} /> {deck.brand.tone}
           </span>
+          <button
+            onClick={downloadPptx}
+            disabled={downloading}
+            className="flex items-center gap-1.5 rounded-full bg-gradient-to-r from-violet-600 to-cyan-500 px-3.5 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+          >
+            <ArrowDownTrayIcon className="h-3.5 w-3.5" /> {downloading ? 'Preparing…' : 'Download .pptx'}
+          </button>
           {canva.design ? (
             <a
               href={canva.design.urls?.edit_url || canva.design.url}
               target="_blank" rel="noreferrer"
-              className="flex items-center gap-1.5 rounded-full bg-white px-3.5 py-1.5 text-xs font-semibold text-ink"
+              className="flex items-center gap-1.5 rounded-full bg-white/10 px-3.5 py-1.5 text-xs font-semibold text-white"
+              title="Canva has no reusable Brand Templates on this account, so this link only opens a blank branded design — use Download .pptx for the actual deck"
             >
-              Open in Canva <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5" />
+              Open blank in Canva <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5" />
             </a>
           ) : canva.connected ? (
             <button
@@ -83,7 +105,12 @@ export default function Deck() {
 
       {canva.warning && (
         <div className="mx-4 mt-3 flex items-start gap-2 rounded-xl bg-amber-400/10 px-3.5 py-2.5 text-xs text-amber-200 sm:mx-6">
-          <ExclamationTriangleIcon className="mt-0.5 h-4 w-4 shrink-0" /> {canva.warning}
+          <ExclamationTriangleIcon className="mt-0.5 h-4 w-4 shrink-0" /> {canva.warning} Use "Download .pptx" above for the fully composed deck — it opens correctly in PowerPoint, Google Slides, or Canva's own PPTX import.
+        </div>
+      )}
+      {downloadError && (
+        <div className="mx-4 mt-3 flex items-start gap-2 rounded-xl bg-rose-400/10 px-3.5 py-2.5 text-xs text-rose-200 sm:mx-6">
+          <ExclamationTriangleIcon className="mt-0.5 h-4 w-4 shrink-0" /> {downloadError}
         </div>
       )}
 

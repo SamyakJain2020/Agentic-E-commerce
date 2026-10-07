@@ -6,7 +6,7 @@ import urllib.parse
 import uuid
 import razorpay
 import requests as pyrequests
-from flask import Flask, jsonify, redirect, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -23,6 +23,8 @@ razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)) i
 DIST_DIR = '/opt/app/frontend/dist'
 PORTFOLIO_DIST_DIR = '/opt/app/portfolio/dist'
 SLIDECRAFT_DIST_DIR = '/opt/app/slidecraft/dist'
+FLUXORA_DIST_DIR = '/opt/app/fluxora/dist'
+AURORA_DIST_DIR = '/opt/app/aurora/dist'
 app = Flask(__name__, static_folder=None)
 CORS(app)
 
@@ -405,6 +407,23 @@ def slidecraft_canva_sync():
     return jsonify({"canva": canva})
 
 
+@app.route('/api/slidecraft/download', methods=['GET'])
+def slidecraft_download_pptx():
+    sid = _session_id()
+    try:
+        pptx_bytes = slidecraft.export_deck_pptx(sid)
+        deck = slidecraft.get_deck(sid)
+        title = (deck.get('deckTitle') or 'SlideCraft-Deck').strip()
+        safe_name = ''.join(c if c.isalnum() or c in ' -_' else '' for c in title).strip() or 'SlideCraft-Deck'
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    return Response(
+        pptx_bytes,
+        mimetype='application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        headers={'Content-Disposition': f'attachment; filename="{safe_name}.pptx"'},
+    )
+
+
 @app.route('/')
 def serve_portfolio_root():
     return send_from_directory(PORTFOLIO_DIST_DIR, 'index.html')
@@ -428,6 +447,20 @@ def serve_static_assets(path):
         if sub and os.path.isfile(full):
             return send_from_directory(SLIDECRAFT_DIST_DIR, sub)
         return send_from_directory(SLIDECRAFT_DIST_DIR, 'index.html')
+
+    if path == 'fluxora' or path.startswith('fluxora/'):
+        sub = path[len('fluxora/'):] if path.startswith('fluxora/') else ''
+        full = os.path.join(FLUXORA_DIST_DIR, sub)
+        if sub and os.path.isfile(full):
+            return send_from_directory(FLUXORA_DIST_DIR, sub)
+        return send_from_directory(FLUXORA_DIST_DIR, 'index.html')
+
+    if path == 'aurora' or path.startswith('aurora/'):
+        sub = path[len('aurora/'):] if path.startswith('aurora/') else ''
+        full = os.path.join(AURORA_DIST_DIR, sub)
+        if sub and os.path.isfile(full):
+            return send_from_directory(AURORA_DIST_DIR, sub)
+        return send_from_directory(AURORA_DIST_DIR, 'index.html')
 
     full = os.path.join(PORTFOLIO_DIST_DIR, path)
     if os.path.isfile(full):

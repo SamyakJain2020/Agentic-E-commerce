@@ -34,6 +34,22 @@ export const api = {
   chat: (message) => request('/api/slidecraft/chat', { method: 'POST', body: JSON.stringify({ message }) }),
   syncCanva: () => request('/api/slidecraft/canva/sync', { method: 'POST' }),
   listUploads: () => request('/api/slidecraft/uploads'),
+  downloadPptx: async (deckTitle) => {
+    const res = await fetch('/api/slidecraft/download', { headers: { 'X-Session-Id': sessionId() } })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      throw new Error(body.error || `Download failed (${res.status})`)
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${(deckTitle || 'SlideCraft-Deck').replace(/[^a-z0-9 _-]/gi, '')}.pptx`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  },
   uploadFiles: async (files) => {
     const form = new FormData()
     for (const f of files) form.append('files', f)

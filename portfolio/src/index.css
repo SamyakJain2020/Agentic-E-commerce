@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html { scroll-behavior: smooth; }
+
+h1, h2, h3, .font-display { font-family: 'Fraunces', ui-serif, Georgia, serif; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #38363e; border-radius: 9999px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+@layer utilities {
+  .text-balance { text-wrap: balance; }
+}

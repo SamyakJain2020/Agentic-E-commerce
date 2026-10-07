@@ -16,6 +16,8 @@ import requests
 from pypdf import PdfReader
 from docx import Document as DocxDocument
 
+from pptx_export import build_pptx
+
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
@@ -708,3 +710,14 @@ def sync_deck_to_canva(session_id: str):
         raise ValueError("No deck found for this session yet — generate one first.")
     deck["canva"] = _run_canva_pipeline(deck["slides"])
     return deck["canva"]
+
+
+def export_deck_pptx(session_id: str) -> bytes:
+    """Render the deck's own panel-grid slides into a real .pptx file directly
+    (native shapes/tables/connectors) — this is the actual downloadable
+    deliverable, independent of Canva's Brand Template autofill, which this
+    account cannot use (no Brand Templates exist on individual Canva Pro)."""
+    deck = DECKS.get(session_id)
+    if not deck:
+        raise ValueError("No deck found for this session yet — generate one first.")
+    return build_pptx(deck)

@@ -6,3 +6,4 @@ gunicorn
 razorpay
 pypdf
 python-docx
+python-pptx
