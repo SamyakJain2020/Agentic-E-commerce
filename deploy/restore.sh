@@ -20,6 +20,7 @@ APP_ROOT=/opt/app
 SRC=/opt/app-src
 SNAP_PREFIX="server-2026-10-08"   # secrets snapshot taken from the live server before shutdown
 
+USER="${USER:-$(id -un)}"   # unset when run from cloud-init/systemd instead of an SSH login
 log() { printf '\n== %s ==\n' "$*"; }
 s3get() { aws s3 cp "s3://$BUCKET/$1" "$2" --region "$REGION" --only-show-errors; }
 
@@ -30,9 +31,12 @@ log "2/9 node via nvm ($NODE_VERSION)"
 if [ ! -s "$HOME/.nvm/nvm.sh" ]; then
   curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
 fi
+set +eu   # nvm.sh is not safe under `set -e` / `set -u`
 # shellcheck disable=SC1091
 . "$HOME/.nvm/nvm.sh"
-nvm install "$NODE_VERSION" >/dev/null 2>&1 || nvm install 22 >/dev/null
+nvm install "$NODE_VERSION" >/dev/null 2>&1 || nvm install 22 >/dev/null 2>&1
+nvm use "$NODE_VERSION" >/dev/null 2>&1 || nvm use 22 >/dev/null 2>&1
+set -eu
 node -v
 
 log "3/9 code from GitHub"
