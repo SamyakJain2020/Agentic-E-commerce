@@ -25,7 +25,7 @@ log() { printf '\n== %s ==\n' "$*"; }
 s3get() { aws s3 cp "s3://$BUCKET/$1" "$2" --region "$REGION" --only-show-errors; }
 
 log "1/9 system packages"
-sudo dnf install -y git python3 python3-pip tar gzip >/dev/null
+sudo dnf install -y git python3 python3-pip tar gzip nginx >/dev/null
 
 log "2/9 node via nvm ($NODE_VERSION)"
 if [ ! -s "$HOME/.nvm/nvm.sh" ]; then
@@ -79,22 +79,26 @@ for d in frontend slidecraft portfolio aurora fluxora; do
   ( cd "$APP_ROOT/$d" && npm ci --no-audit --no-fund >/dev/null && npm run build >/dev/null )
 done
 
+CERT=/etc/letsencrypt/live/samyak-jain.tech/fullchain.pem
 if [ "$RESTORE_TLS" = "1" ]; then
   log "8/9 TLS certificate for samyak-jain.tech (from S3 snapshot)"
   if s3get "secrets/$SNAP_PREFIX/letsencrypt.tar.gz" /tmp/letsencrypt.tar.gz 2>/dev/null; then
     sudo tar xzf /tmp/letsencrypt.tar.gz -C /etc
     rm -f /tmp/letsencrypt.tar.gz
   else
-    echo "no TLS snapshot found; server will serve HTTP only until you issue a cert (see deploy/README.md)"
+    echo "no TLS snapshot found; nginx will serve HTTP only until you issue a cert (see deploy/README.md)"
   fi
-  # auto-renew: the snapshot's renewal config uses the nginx plugin (not installed); switch it to
-  # standalone, briefly stopping flask_app to free :80, and run `certbot renew` from a systemd timer
+  # auto-renew via webroot (nginx serves /.well-known/acme-challenge on :80, no downtime). The snapshot's
+  # renewal config used the nginx plugin, which isn't installed; rewrite its [renewalparams].
   [ -x /opt/certbot/bin/certbot ] || { sudo python3 -m venv /opt/certbot && sudo /opt/certbot/bin/pip install --quiet certbot; }
+  sudo mkdir -p /var/www/letsencrypt
   renew_conf=/etc/letsencrypt/renewal/samyak-jain.tech.conf
   if sudo test -f "$renew_conf"; then
-    sudo sed -i -e 's/^authenticator = nginx/authenticator = standalone/' -e '/^installer = nginx/d' "$renew_conf"
-    sudo grep -q '^pre_hook' "$renew_conf" \
-      || printf 'pre_hook = systemctl stop flask_app\npost_hook = systemctl start flask_app\n' | sudo tee -a "$renew_conf" >/dev/null
+    sudo sed -i -e '/^\[\[webroot_map\]\]/,$d' \
+      -e '/^\(authenticator\|installer\|webroot_path\|pre_hook\|post_hook\|renew_hook\) =/d' "$renew_conf"
+    printf '%s\n' 'authenticator = webroot' 'webroot_path = /var/www/letsencrypt,' 'renew_hook = systemctl reload nginx' \
+      '[[webroot_map]]' 'samyak-jain.tech = /var/www/letsencrypt' 'www.samyak-jain.tech = /var/www/letsencrypt' \
+      | sudo tee -a "$renew_conf" >/dev/null
   fi
   printf '[Unit]\nDescription=Renew Let'"'"'s Encrypt certs\n[Service]\nType=oneshot\nExecStart=/opt/certbot/bin/certbot renew --quiet\n' \
     | sudo tee /etc/systemd/system/certbot-renew.service >/dev/null
@@ -106,20 +110,41 @@ else
   log "8/9 TLS restore skipped (RESTORE_TLS=0)"
 fi
 
-log "9/9 systemd service"
+log "9/9 systemd service + nginx"
+# Flask listens on 127.0.0.1:8000 (PORT in the unit); nginx owns :80/:443
 sudo cp "$SRC/deploy/flask_app.service" /etc/systemd/system/flask_app.service
 sudo systemctl daemon-reload
 sudo systemctl enable flask_app >/dev/null 2>&1
 sudo systemctl restart flask_app
+sudo mkdir -p /var/www/letsencrypt
+if sudo test -f "$CERT"; then
+  sudo cp "$SRC/deploy/nginx-samyak-jain.tech.conf" /etc/nginx/conf.d/samyak-jain.tech.conf
+else
+  # no cert yet: plain-HTTP proxy, which also serves the webroot for `certbot certonly --webroot`
+  printf '%s\n' 'server {' '    listen 80 default_server;' '    listen [::]:80 default_server;' '    server_name _;' \
+    '    client_max_body_size 50m;' '    location /.well-known/acme-challenge/ { root /var/www/letsencrypt; }' \
+    '    location / { proxy_pass http://127.0.0.1:8000; proxy_set_header Host $host; proxy_read_timeout 300s; }' '}' \
+    | sudo tee /etc/nginx/conf.d/samyak-jain.tech.conf >/dev/null
+fi
+sudo nginx -t
+sudo systemctl enable nginx >/dev/null 2>&1
+sudo systemctl restart nginx
 sleep 4
 
-log "smoke test (http://127.0.0.1)"
+log "smoke test (Flask on http://127.0.0.1:8000, then nginx)"
 fail=0
 for p in /health / /aura /aura/shop /slidecraft /aurora/ /fluxora/ /api/products /api/slidecraft/auth/status \
          /aurora/hero.mp4 /fluxora/hero-loop.mp4 /Samyak_Jain_Resume.pdf; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1$p")
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8000$p")
   printf '%-34s %s\n' "$p" "$code"
   [ "$code" = "200" ] || fail=1
 done
-curl -s http://127.0.0.1/health; echo
+if sudo test -f "$CERT"; then
+  code=$(curl -s -o /dev/null -w '%{http_code}' --resolve samyak-jain.tech:443:127.0.0.1 https://samyak-jain.tech/health)
+  printf '%-34s %s\n' "nginx https /health" "$code"; [ "$code" = "200" ] || fail=1
+else
+  code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/health)
+  printf '%-34s %s\n' "nginx http /health" "$code"; [ "$code" = "200" ] || fail=1
+fi
+curl -s http://127.0.0.1:8000/health; echo
 [ "$fail" = "0" ] && echo "RESTORE OK" || { echo "RESTORE FINISHED WITH FAILURES (see above)"; exit 1; }

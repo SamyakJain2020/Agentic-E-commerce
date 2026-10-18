@@ -5,6 +5,8 @@ After=network.target
 [Service]
 User=root
 WorkingDirectory=/opt/app/backend
+# listen on 127.0.0.1:8000 only; nginx serves :80/:443 (see nginx-samyak-jain.tech.conf)
+Environment=PORT=8000
 ExecStart=/opt/app/venv/bin/python main.py
 Restart=always
 RestartSec=3
