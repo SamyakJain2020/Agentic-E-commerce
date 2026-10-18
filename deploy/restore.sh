@@ -87,6 +87,21 @@ if [ "$RESTORE_TLS" = "1" ]; then
   else
     echo "no TLS snapshot found; server will serve HTTP only until you issue a cert (see deploy/README.md)"
   fi
+  # auto-renew: the snapshot's renewal config uses the nginx plugin (not installed); switch it to
+  # standalone, briefly stopping flask_app to free :80, and run `certbot renew` from a systemd timer
+  [ -x /opt/certbot/bin/certbot ] || { sudo python3 -m venv /opt/certbot && sudo /opt/certbot/bin/pip install --quiet certbot; }
+  renew_conf=/etc/letsencrypt/renewal/samyak-jain.tech.conf
+  if sudo test -f "$renew_conf"; then
+    sudo sed -i -e 's/^authenticator = nginx/authenticator = standalone/' -e '/^installer = nginx/d' "$renew_conf"
+    sudo grep -q '^pre_hook' "$renew_conf" \
+      || printf 'pre_hook = systemctl stop flask_app\npost_hook = systemctl start flask_app\n' | sudo tee -a "$renew_conf" >/dev/null
+  fi
+  printf '[Unit]\nDescription=Renew Let'"'"'s Encrypt certs\n[Service]\nType=oneshot\nExecStart=/opt/certbot/bin/certbot renew --quiet\n' \
+    | sudo tee /etc/systemd/system/certbot-renew.service >/dev/null
+  printf '[Unit]\nDescription=Twice-daily certbot renew check\n[Timer]\nOnCalendar=*-*-* 03,15:17:00\nRandomizedDelaySec=1h\nPersistent=true\n[Install]\nWantedBy=timers.target\n' \
+    | sudo tee /etc/systemd/system/certbot-renew.timer >/dev/null
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now certbot-renew.timer >/dev/null 2>&1
 else
   log "8/9 TLS restore skipped (RESTORE_TLS=0)"
 fi
