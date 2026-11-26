@@ -472,7 +472,10 @@ CERT_PATH = '/etc/letsencrypt/live/samyak-jain.tech/fullchain.pem'
 KEY_PATH = '/etc/letsencrypt/live/samyak-jain.tech/privkey.pem'
 
 if __name__ == '__main__':
-    if os.path.exists(CERT_PATH):
+    if os.environ.get('PORT'):
+        # behind nginx (deploy/nginx-samyak-jain.tech.conf), which terminates TLS
+        app.run(host='127.0.0.1', port=int(os.environ['PORT']), threaded=True)
+    elif os.path.exists(CERT_PATH):
         threading.Thread(target=lambda: app.run(host='0.0.0.0', port=80), daemon=True).start()
         app.run(host='0.0.0.0', port=443, ssl_context=(CERT_PATH, KEY_PATH))
     else:
